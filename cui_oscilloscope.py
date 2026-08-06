@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-cui_oscilloscope.py
+astr.py
 --------------------
 複数のWAVファイルを格子状(縦x横)に並べて、波形をオシロスコープ風に
 描画した動画(mp4)を書き出すCUIツール。
 
-- 白い波形 / 黒背景 (色は変更可)
-- 各セルの区切りに線を引く
-- 装飾要素(軸・目盛り・文字)は一切なし
-- オプションでゼロクロストリガーによる波形の安定化
-- オプションで入力WAVをミックスして音声として動画に付与
 
 使用例:
-    python cui_oscilloscope.py a.wav b.wav c.wav d.wav \
+    python astr.py a.wav b.wav c.wav d.wav \
         --cols 2 --rows 2 --output out.mp4
 
 依存: numpy, opencv-python, ffmpeg(PATHに存在すること)
