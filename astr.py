@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-astr.py
+cui_oscilloscope.py
 --------------------
 複数のWAVファイルを格子状(縦x横)に並べて、波形をオシロスコープ風に
 描画した動画(mp4)を書き出すCUIツール。
 
+- 白い波形 / 黒背景 (色は変更可)
+- 各セルの区切りに線を引く
+- 装飾要素(軸・目盛り・文字)は一切なし
+- オプションでゼロクロストリガーによる波形の安定化
+- オプションで入力WAVをミックスして音声として動画に付与
 
 使用例:
-    python astr.py a.wav b.wav c.wav d.wav \
+    python cui_oscilloscope.py a.wav b.wav c.wav d.wav \
         --cols 2 --rows 2 --output out.mp4
 
 依存: numpy, opencv-python, ffmpeg(PATHに存在すること)
@@ -84,9 +89,33 @@ def find_trigger(samples: np.ndarray, center: int, search_radius: int) -> int:
     idx = crossings_abs[np.argmin(np.abs(crossings_abs - center))]
     return int(idx)
 
+def find_match_trigger(samples: np.ndarray, center: int, search_radius: int, window_len: int, prev_window: np.ndarray = None) -> int:
+    """前フレームの波形(prev_window)と最も誤差が小さく重なる位置を探す"""
+    if prev_window is None or len(prev_window) != window_len:
+        # 初回フレームや波形がない場合は従来のゼロクロスで起点を探す
+        return find_trigger(samples, center, search_radius)
 
+    half = window_len // 2
+    lo = max(half, center - search_radius)
+    hi = min(len(samples) - half, center + search_radius)
+
+    if hi <= lo:
+        return center
+
+    best_center = center
+    min_err = float('inf')
+
+    # 探索領域内で2乗誤差(SSD)が最小となる中心位置を探索
+    for cand_center in range(lo, hi):
+        cand_win = get_window(samples, cand_center, window_len)
+        err = np.sum((cand_win - prev_window) ** 2)
+        if err < min_err:
+            min_err = err
+            best_center = cand_center
+
+    return best_center
 def get_window(samples: np.ndarray, center: int, window_len: int) -> np.ndarray:
-    """centerを中心にwindow_len個のサンプルを取り出す。範囲外は0埋め。"""
+    """centerを中心にwindow_len個のサンプルを取り出す。範囲外は端の値で埋める。"""
     half = window_len // 2
     start = center - half
     end = start + window_len
@@ -94,16 +123,18 @@ def get_window(samples: np.ndarray, center: int, window_len: int) -> np.ndarray:
     if start >= 0 and end <= len(samples):
         return samples[start:end]
 
-    buf = np.zeros(window_len, dtype=np.float32)
     src_start = max(0, start)
     src_end = min(len(samples), end)
-    if src_end > src_start:
-        dst_start = src_start - start
-        dst_end = dst_start + (src_end - src_start)
-        buf[dst_start:dst_end] = samples[src_start:src_end]
-    return buf
 
+    if src_start >= src_end:
+        return np.zeros(window_len, dtype=np.float32)
 
+    sliced = samples[src_start:src_end]
+    pad_left = max(0, -start)
+    pad_right = max(0, end - len(samples))
+
+    # 範囲外を0埋めせず、端のサンプル値で補完して不要な直線化を防ぐ
+    return np.pad(sliced, (pad_left, pad_right), mode='edge')
 # --------------------------------------------------------------------------
 # 色パース
 # --------------------------------------------------------------------------
@@ -222,7 +253,7 @@ def main():
 
     window_samples_cache = {}
     trigger_pos = [0] * len(tracks)  # 各トラックの前回トリガー位置(検索の起点)
-
+    prev_windows = [None] * len(tracks)
     try:
         for frame_idx in range(n_frames):
             t = frame_idx / args.fps
@@ -243,23 +274,28 @@ def main():
 
                 if not args.no_trigger:
                     search_radius = window_len // 2
-                    center = find_trigger(samples, center, search_radius)
-
+                    # center = find_trigger(samples, center, search_radius)
+                    center = find_match_trigger(samples, center, search_radius, window_len, prev_windows[i])
                 window = get_window(samples, center, window_len)
+                prev_windows[i] = window.copy()
+                window = get_window(samples, center, window_len)
+                prev_windows[i] = window.copy()
 
-                # cell_w ピクセルに合わせて線形補間
-                if window_len == cell_w:
-                    line_vals = window
-                else:
-                    xp = np.arange(window_len, dtype=np.float32)
-                    x_new = np.linspace(0, window_len - 1, cell_w, dtype=np.float32)
-                    line_vals = np.interp(x_new, xp, window)
+                # 線形補間
+                xp = np.arange(window_len, dtype=np.float32)
+                x_new = np.linspace(0, window_len - 1, cell_w, dtype=np.float32)
+                line_vals = np.interp(x_new, xp, window)
 
+                # 上下端への貼り付きを防ぐため 1 ~ (cell_h - 2) の範囲に制限
                 ys = (cell_h / 2.0 - line_vals * amp_scale).astype(np.int32)
-                ys = np.clip(ys, 0, cell_h - 1)
-                xs = np.arange(cell_w, dtype=np.int32)
-                points = np.column_stack((xs, ys)).reshape(-1, 1, 2)
+                ys = np.clip(ys, 1, cell_h - 2)
 
+                # 左右の境界線と重ならないよう線の太さに応じて余白(pad)を取る
+                pad = max(1, args.line_thickness // 2)
+                xs = np.linspace(pad, cell_w - 1 - pad, cell_w, dtype=np.int32)
+
+                points = np.column_stack((xs, ys)).reshape(-1, 1, 2)
+                
                 cell_view = frame[y0:y1, x0:x1]
                 cv2.polylines(cell_view, [points], isClosed=False,
                                color=args.line_color, thickness=args.line_thickness,
